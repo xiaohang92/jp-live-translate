@@ -278,7 +278,7 @@ ffmpeg -i FILE -ac 1 -ar 16000 -f s16le pipe:1
 
 int16 bytes → float32 in `[-1, 1]`. That array is what Whisper sees, whether the source was webm, ogg, or mp4.
 
-Playback is a **second** decode: VLC plays the original file so picture and sound stay on VLC’s clock. ASR does not listen to the player; it already transcribed ffmpeg PCM. Qt/QuickTime is not used for video (this Gaki file is AV1, which those cannot decode).
+Playback is a **second** decode: VLC plays the original file so picture and sound stay on VLC’s clock. ASR does not listen to the player; it already transcribed ffmpeg PCM. Qt/QuickTime is not used for video (some files are AV1, which those cannot decode).
 
 ---
 
@@ -308,14 +308,13 @@ When something feels “wrong”, ask which product you are in.
 ## 9. Commands
 
 ```bash
-cd ~/Projects/jp-live-translate
 source .venv/bin/activate
 
 # 1) Prepare captions (slow, once). Does not play.
-python prepare.py --file "file/Gaki 26.08.09.mp4" --to zh
+python prepare.py --file video.mp4 --to zh
 
 # 2a) Play: this script launches VLC (smooth; no Whisper).
-python overlay.py --file "file/Gaki 26.08.09.mp4" --to zh
+python overlay.py --file video.mp4 --to zh
 
 # 2b) Or leave a watcher running and open the video yourself.
 python watch.py

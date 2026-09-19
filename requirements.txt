@@ -1,7 +1,8 @@
 faster-whisper>=1.1.0
 soundcard>=0.4.3
 numpy>=1.26.0
-python-vlc>=3.0.20123
+PyQt6>=6.7.0
 sentencepiece>=0.2.0
+ctranslate2>=4.0.0
 transformers>=4.40.0
 mlx-whisper>=0.4.0; sys_platform == "darwin"

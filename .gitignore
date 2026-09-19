@@ -4,6 +4,10 @@ __pycache__/
 .DS_Store
 *.egg-info/
 .python-version
+.env
+file/
+*.mp4
+*.mkv
 cues/*
 !cues/.gitkeep
 *.cues.json
