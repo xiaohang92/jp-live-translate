@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 *.egg-info/
 .python-version
+cues/*
+!cues/.gitkeep
+*.cues.json

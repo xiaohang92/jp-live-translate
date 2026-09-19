@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Capture system audio in 3-second buffers and translate Japanese to English.
+"""Capture system audio and translate Japanese to English or Chinese (console).
 
-Uses a local faster-whisper model (small or medium). Output is printed to the
-console. On macOS, true system-audio capture needs a virtual device such as
-BlackHole: route sound through a Multi-Output Device (speakers + BlackHole),
-then record from BlackHole. Use --mic to test with the default microphone.
+On macOS, true system-audio capture needs a virtual device such as BlackHole.
+Use --mic to test with the default microphone.
 """
 
 from __future__ import annotations
@@ -16,7 +14,16 @@ import warnings
 
 import numpy as np
 import soundcard as sc
-from faster_whisper import WhisperModel
+
+from engine import (
+    BUFFER_SECONDS,
+    HOP_SECONDS,
+    SAMPLE_RATE,
+    iter_live_utterances,
+    load_pipeline,
+    normalize_target,
+    to_mono_f32,
+)
 
 # SoundCard cannot tap speakers on macOS; include_loopback only works on Windows.
 if sys.platform == "darwin":
@@ -26,9 +33,6 @@ if sys.platform == "darwin":
         category=Warning,
     )
 
-SAMPLE_RATE = 16_000
-BUFFER_SECONDS = 3.0
-SILENCE_RMS = 0.008
 LOOPBACK_HINTS = (
     "blackhole",
     "loopback",
@@ -103,43 +107,69 @@ def find_capture_device(name: str | None, use_mic: bool):
     )
 
 
-def to_mono_f32(audio: np.ndarray) -> np.ndarray:
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
-    return np.ascontiguousarray(audio, dtype=np.float32)
+def load_audio_file(path: str, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode any ffmpeg-readable file to mono float32 at Whisper's sample rate."""
+    import subprocess
 
-
-def is_silent(audio: np.ndarray, threshold: float = SILENCE_RMS) -> bool:
-    if audio.size == 0:
-        return True
-    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float32))))
-    return rms < threshold
-
-
-def load_model(name: str) -> WhisperModel:
-    return WhisperModel(name, device="cpu", compute_type="int8")
-
-
-def translate_audio(model: WhisperModel, audio: np.ndarray) -> str:
-    segments, _info = model.transcribe(
-        audio,
-        language="ja",
-        task="translate",
-        beam_size=1,
-        condition_on_previous_text=False,
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-i",
+            path,
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-v",
+            "error",
+            "pipe:1",
+        ],
+        check=False,
+        capture_output=True,
     )
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail or f"ffmpeg failed to decode {path}")
+    audio = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if audio.size == 0:
+        raise RuntimeError(f"No audio decoded from {path}")
+    return audio
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Local Japanese → English live translation (console)."
+        description="Local Japanese → English/Chinese live translation (console)."
     )
     parser.add_argument(
         "--model",
         default="small",
         choices=("small", "medium"),
-        help="faster-whisper model size (default: small).",
+        help="Whisper model size (default: small).",
+    )
+    parser.add_argument(
+        "--backend",
+        default="auto",
+        choices=("auto", "mlx", "faster-whisper"),
+        help="ASR backend (default: auto = MLX on Apple Silicon).",
+    )
+    parser.add_argument(
+        "--mt",
+        default="cascade",
+        choices=("cascade", "nanosakura", "hymt", "whisper"),
+        help="cascade = opus-mt; nanosakura = ja→zh 0.2B; hymt = Hy-MT2 1.8B; whisper = English-only.",
+    )
+    parser.add_argument(
+        "--to",
+        dest="target",
+        default="en",
+        help="Caption language: en (default) or zh (Simplified Chinese).",
     )
     parser.add_argument(
         "--device",
@@ -159,7 +189,13 @@ def parse_args() -> argparse.Namespace:
         "--buffer",
         type=float,
         default=BUFFER_SECONDS,
-        help="Audio buffer length in seconds (default: 3).",
+        help="Max utterance length in seconds (default: 8).",
+    )
+    parser.add_argument(
+        "--hop",
+        type=float,
+        default=HOP_SECONDS,
+        help="Live VAD frame length in seconds (default: 0.5).",
     )
     return parser.parse_args()
 
@@ -170,32 +206,45 @@ def main() -> int:
         list_devices()
         return 0
 
-    if args.buffer <= 0:
-        raise SystemExit("--buffer must be positive")
+    if args.buffer <= 0 or args.hop <= 0:
+        raise SystemExit("--buffer and --hop must be positive")
+    try:
+        args.target = normalize_target(args.target)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
     mic = find_capture_device(args.device, args.mic)
-    frames = int(args.buffer * SAMPLE_RATE)
-
-    print(f"Loading faster-whisper '{args.model}' on CPU (int8)...")
-    print("First run downloads the model weights; later runs are local-only.")
-    model = load_model(args.model)
+    print("Loading models (first run downloads weights)...")
+    pipeline = load_pipeline(
+        args.model, backend=args.backend, mt=args.mt, target=args.target
+    )
+    print(pipeline.label)
 
     print(f"Capturing from: {mic.name}")
     print(
-        f"Buffer: {args.buffer:g}s @ {SAMPLE_RATE} Hz | "
-        "language=ja | task=translate (Japanese → English)"
+        f"Pause-cut live captions  hop={args.hop:g}s  max={args.buffer:g}s  "
+        f"@{SAMPLE_RATE} Hz"
     )
     print("Ctrl+C to stop.\n")
 
+    last_pair = ("", "")
     with mic.recorder(samplerate=SAMPLE_RATE, channels=1) as recorder:
-        while True:
-            audio = to_mono_f32(recorder.record(numframes=frames))
-            if is_silent(audio):
-                continue
+        def record_hop(frames: int):
+            return to_mono_f32(recorder.record(numframes=frames))
 
-            text = translate_audio(model, audio)
-            if text:
-                print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+        for utterance in iter_live_utterances(
+            record_hop, args.hop, args.buffer, lambda: False
+        ):
+            japanese, english = pipeline.run(utterance)
+            pair = (japanese, english)
+            if pair == last_pair or not (japanese or english):
+                continue
+            last_pair = pair
+            stamp = time.strftime("%H:%M:%S")
+            if japanese:
+                print(f"[{stamp}] JA  {japanese}", flush=True)
+            if english:
+                print(f"         {pipeline.target_tag}  {english}", flush=True)
 
 
 if __name__ == "__main__":
